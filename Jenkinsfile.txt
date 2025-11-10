@@ -1,0 +1,63 @@
+pipeline {
+  agent any
+  environment {
+    DOCKERHUB_CREDS = credentials('dockerhub-creds')
+    SONAR_TOKEN = credentials('sonar-token')
+    IMAGE_NAME = "${DOCKERHUB_CREDS_USR}/aceest-fitness"
+    IMAGE_TAG = "v${BUILD_ID}"
+  }
+  stages {
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+    stage('Install & Test') {
+      steps {
+        sh 'pip install -r requirements.txt'
+        sh 'pytest --junitxml=results.xml --cov=. --cov-report=xml'
+      }
+      post {
+        always { junit 'results.xml' }
+      }
+    }
+    stage('SonarQube Analysis') {
+      steps {
+        withSonarQubeEnv('SonarQube') {
+          sh """
+          sonar-scanner \
+            -Dsonar.projectKey=ACEest \
+            -Dsonar.sources=. \
+            -Dsonar.python.coverage.reportPaths=coverage.xml \
+            -Dsonar.login=${SONAR_TOKEN}
+          """
+        }
+      }
+    }
+    stage('Build Docker Image') {
+      steps {
+        sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
+      }
+    }
+    stage('Push Docker Image') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'USER', passwordVariable: 'PASS')]) {
+          sh "echo $PASS | docker login -u $USER --password-stdin"
+          sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
+        }
+      }
+    }
+    stage('Deploy to Kubernetes') {
+      steps {
+        sh "kubectl set image deployment/aceest-app aceest-app=${IMAGE_NAME}:${IMAGE_TAG} --record || true"
+        sh "kubectl rollout status deployment/aceest-app"
+      }
+    }
+  }
+  post {
+    success {
+      echo "✅ Deployment completed successfully!"
+    }
+    failure {
+      echo "❌ Build failed. Check logs."
+    }
+  }
+}
